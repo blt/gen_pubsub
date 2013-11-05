@@ -1,7 +1,7 @@
 REBAR=`which rebar`
 DIALYZER=`which dialyzer`
 
-all: deps compile
+all: compile
 
 deps:
 	@$(REBAR) get-deps
@@ -17,8 +17,8 @@ dialyze: app.plt compile
 		-Werror_handling -Wrace_conditions -Wno_undefined_callbacks
 
 test: compile
-	@$(REBAR) eunit skip_deps=true verbose=0
-	ct_run -dir test/ -pa ebin/ -verbosity 0 -logdir .ct/logs -erl_args +K true +A 10
+	# @$(REBAR) eunit skip_deps=true verbose=0
+	ct_run -dir test/ -pa src/ -pa ebin/ -verbosity 0 -logdir .ct/logs -cover test/cover.spec -erl_args +K true +A 10
 
 validate: dialyze test
 

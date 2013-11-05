@@ -1,5 +1,4 @@
 -module(gen_pubsub).
-
 %% This module provides a pub-sub behaviour. If you find yourself periodically
 %% creating a process that keeps a susbscriber pool and publishes messages to
 %% them on demand, this behaviour is for you.
@@ -12,474 +11,223 @@
 %% No filtering is offered. It is assumed that if a client needs this feature
 %% they will implement it above the behaviour level.
 
+-behaviour(gen_server).
+
 %% API
 -export([
          start/3, start/4,
          start_link/3, start_link/4,
-         publish/2, %% sync_publish/3,
-         subscribe/2, %% sync_subscribe/3,
-         unsubscribe/2, %% sync_unsubscribe/3
-         wake_hib/5
+         publish/2,
+         subscribe/2,
+         unsubscribe/2
         ]).
 
-%% System exports
+%% [PRIVATE] internal functions
 -export([
-         system_continue/3,
-         system_terminate/4,
-         system_code_change/4
+         do_publish/4
         ]).
 
-%% Internal export -- required by stdlib's gen.erl
--export([init_it/6]).
+%% [PRIVATE] gen_server callbacks
+-export([
+         init/1,
+         handle_call/3,
+         handle_cast/2,
+         handle_info/2,
+         terminate/2,
+         code_change/3
+        ]).
 
 %% Types
--export_type([ref/0, debug_flag/0]).
+%% -export_type([ref/0, debug_flag/0]).
+
+%% ===================================================================
+%%  Records
+%% ===================================================================
+
+-record(state, {
+          module            :: module(),
+          client_state      :: any(),
+          linked_procs = [] :: [{pid(), reference()}]
+         }).
+
+%% ===================================================================
+%%  Macros
+%% ===================================================================
+
+-define(PUB(From, Msg), {'$gen_pubsub_publish', From, Msg}).
+-define(SUB(Client),    {'$gen_pubsub_subscribe', Client}).
+-define(UNSUB(Client),  {'$gen_pubsub_unsubscribe', Client}).
+
+%%% I'm unsure about this. I sort of think that publishing--which is done in the
+%%% background--should have some notification _back_ to the sender. I am divided
+%%% as to whether this should be a callback function or what.
+%% -define(PUBSEND(UID), {'$gen_pubsub_publish_fin', UID}).
 
 %% ===================================================================
 %%  Types
 %% ===================================================================
 
--type ref()        :: pid() | atom() | {Name :: atom(), node()} |
-                      {via, Mod :: module(), Name :: atom()} |
-                      {global, term()} | {local, atom()}.
--type debug_flag() :: trace | log | {logfile, file:filename()} |
-                      statistics | debug.
+%% -type erlang:dst()        :: pid() | atom() | {Name :: atom(), node()} |
+%%                       {via, Mod :: module(), Name :: atom()} |
+%%                       {global, term()} | {local, atom()}.
+%% -type debug_flag() :: trace | log | {logfile, file:filename()} |
+%%                       statistics | debug.
 
 %% ===================================================================
 %%  Callback API
 %% ===================================================================
 
--callback init(Args :: term()) -> {ok, State :: term()} |
-                                  {ok, State :: term(), Timeout :: timer:time()}.
+-callback init(Args :: term()) -> {ok, State :: term()}. %% |
+                                  %% {ok, State :: term(), Timeout :: timer:time()}.
 
 %% handle_publish -- invoked on gen_pubsub:publish/2
 %%
 %% When return is {ok, State} message is passed on to subscribers. When
 %% {reject, State} nothing is passed on to subscribers.
 -callback handle_publish(Msg :: term(),
-                         From :: ref(),
+                         From :: erlang:dst(),
                          State :: term()) -> {ok | reject, State :: term()}.
 
 %% handle_subscribe -- invoked on gen_pubsub:subscribe/
--callback handle_subscribe(From :: ref(),
+-callback handle_subscribe(From :: erlang:dst(),
                            State :: term()) -> {ok | reject, State :: term()}.
 
 -callback handle_unsubscribe(Reason :: (death | request),
-                             From :: ref(),
+                             From :: erlang:dst(),
                              State :: term()) -> {ok, State :: term()}.
 
 %% ===================================================================
 %%  API
 %% ===================================================================
 
-start(Mod, Args, Options) ->
-    gen:start(?MODULE, nolink, Mod, Args, Options).
+start(Module, Args, Options) ->
+    gen_server:start(?MODULE, {Module, Args}, Options).
 
-start(Name, Mod, Args, Options) ->
-    gen:start(?MODULE, nolink, Name, Mod, Args, Options).
+start(ServerName, Module, Args, Options) ->
+    gen_server:start(ServerName, ?MODULE, {Module, Args}, Options).
 
--spec start_link(Mod :: module(),
-                 Args :: term(),
-                 Options :: [{timeout, timer:time()} |
-                             {debug, debug_flag()}])
-                -> {ok, pid()} |
-                   {error, {already_started, pid()}} |
-                   {error, Reason :: term()}.
-start_link(Mod, Args, Options) ->
-    gen:start(?MODULE, link, Mod, Args, Options).
+%% -spec start_link(Mod :: module(),
+%%                  Args :: term(),
+%%                  Options :: [{timeout, timer:time()} |
+%%                              {debug, debug_flag()}])
+%%                 -> {ok, pid()} |
+%%                    {error, {already_started, pid()}} |
+%%                    {error, Reason :: term()}.
+start_link(Module, Args, Options) ->
+    gen_server:start_link(?MODULE, {Module, Args}, Options).
 
--spec start_link(Name :: {local, atom()} | {global, term()} | {via, atom(), term()},
-                 Mod :: module(),
-                 Args :: term(),
-                 Options :: [{timeout, timer:time()} |
-                             {debug, debug_flag()}])
-                -> {ok, pid()} |
-                   {error, {already_started, pid()}} |
-                   {error, Reason :: term()}.
-start_link(Name, Mod, Args, Options) ->
-    gen:start(?MODULE, link, Name, Mod, Args, Options).
+%% -spec start_link(Name :: {local, atom()} | {global, term()} | {via, atom(), term()},
+%%                  Mod :: module(),
+%%                  Args :: term(),
+%%                  Options :: [{timeout, timer:time()} |
+%%                              {debug, debug_flag()}])
+%%                 -> {ok, pid()} |
+%%                    {error, {already_started, pid()}} |
+%%                    {error, Reason :: term()}.
+start_link(ServerName, Module, Args, Options) ->
+    gen_server:start_link(ServerName, ?MODULE, {Module, Args}, Options).
 
 %% Issues a public request to the pub-sub process. The issuing process will
-%% receive a {pubsub, PubSub :: ref(), published} message when all subscribed
+%% receive a {pubsub, PubSub :: erlang:dst(), published} message when all subscribed
 %% processes have been notified.
--spec publish(PubSubRef :: ref(), Msg :: any()) -> ok.
-publish(PubSubRef, Msg) -> cast(PubSubRef, pub_msg(Msg)).
+-spec publish(PubSubRef :: erlang:dst(), Msg :: any()) -> ok.
+publish(PubSubRef, Msg) -> gen_server:cast(PubSubRef, ?PUB(self(), Msg)).
 
 %% Publishes a message to the pub-sub process subscribers. The calling process
 %% will block for up to Timeout milliseconds.
-%% -spec sync_publish(PubSub :: ref(),
+%% -spec sync_publish(PubSub :: erlang:dst(),
 %%                    Msg :: any(),
 %%                    Timeout :: timer:time()) -> ok | {error, timeout}.
 
 %% Issues a subscribe request to the pub-sub process. The issuing process will
-%% receive a {pubsub, PubSub :: ref(), subscribed} message when subscribed.
--spec subscribe(PubSubRef :: ref(), Client :: ref()) -> ok.
-subscribe(PubSubRef, Client) -> cast(PubSubRef, sub_msg(Client)).
+%% receive a {pubsub, PubSub :: erlang:dst(), subscribed} message when subscribed.
+-spec subscribe(PubSubRef :: erlang:dst(), Client :: erlang:dst()) -> ok.
+subscribe(PubSubRef, Client) -> gen_server:cast(PubSubRef, ?SUB(Client)).
 
 %% Subscribes to the pub-sub process. The calling process will block for up to
 %% Timeout milliseconds.
-%% -spec sync_subscribe(PubSub :: ref(),
-%%                      Client :: ref(),
+%% -spec sync_subscribe(PubSub :: erlang:dst(),
+%%                      Client :: erlang:dst(),
 %%                      Timeout :: timer:time()) -> ok | {error, timeout}.
 
 %% Issues an unsubscribe request to the pub-sub process. The issuing process
 %% will receive a {pubsub, PubSub, unsubscribed} message when unsubscribed.
--spec unsubscribe(PubSubRef :: ref(), Client :: ref()) -> ok.
-unsubscribe(PubSubRef, Client) -> cast(PubSubRef, unsub_msg(Client)).
+-spec unsubscribe(PubSubRef :: erlang:dst(), Client :: erlang:dst()) -> ok.
+unsubscribe(PubSubRef, Client) -> gen_server:cast(PubSubRef, ?UNSUB(Client)).
 
 %% Unsubscribes from the pub-sub process. The calling process will block for up
 %% to Timeout milliseconds.
-%% -spec sync_unsubscribe(PubSub :: ref(),
-%%                        Client :: ref(),
+%% -spec sync_unsubscribe(PubSub :: erlang:dst(),
+%%                        Client :: erlang:dst(),
 %%                        Timeout :: timer:time()) -> ok | {error, timeout}.
 
 %% ===================================================================
-%%  System Message API
+%%  gen_server callbacks
 %% ===================================================================
 
-system_continue(Parent, Debug, [Name, State, Mod, Time]) ->
-    loop(Parent, Name, State, Mod, Time, Debug).
+init({Mod, Args}) ->
+    {ok, ClientState} = Mod:init(Args),
+    process_flag(trap_exit, true),
+    {ok, #state{client_state=ClientState, module=Mod}}.
 
--spec system_terminate(_, _, _, _) -> no_return().
-system_terminate(Reason, _Parent, Debug, [Name, State, Mod, _Time]) ->
-    terminate(Reason, Name, [], Mod, State, Debug).
+handle_call(_Request, _From, State) ->
+    {noreply, State}.
 
-system_code_change([Name, State, Mod, Time], _Module, OldVsn, Extra) ->
-    case catch Mod:code_change(OldVsn, State, Extra) of
-	{ok, NewState} -> {ok, [Name, NewState, Mod, Time]};
-	Else -> Else
-    end.
-
-%% ===================================================================
-%%  Internal Functions
-%% ===================================================================
-
-%%% ------------------------------------------------------------------
-%%%  Initialization callback for gen
-%%% ------------------------------------------------------------------
-init_it(Starter, self, Name, Mod, Args, Options) ->
-    init_it(Starter, self(), Name, Mod, Args, Options);
-init_it(Starter, Parent, Name0, Mod, Args, Options) ->
-    Name = name(Name0),
-    Debug = gen:debug_options(Options),
-    case catch Mod:init(Args) of
-	{ok, State} ->
-	    proc_lib:init_ack(Starter, {ok, self()}),
-	    loop(Parent, Name, State, Mod, infinity, Debug);
-	{ok, State, Timeout} ->
-	    proc_lib:init_ack(Starter, {ok, self()}),
-	    loop(Parent, Name, State, Mod, Timeout, Debug);
-	{stop, Reason} ->
-	    %% For consistency, we must make sure that the
-	    %% registered name (if any) is unregistered before
-	    %% the parent process is notified about the failure.
-	    %% (Otherwise, the parent process could get
-	    %% an 'already_started' error if it immediately
-	    %% tried starting the process again.)
-	    unregister_name(Name0),
-	    proc_lib:init_ack(Starter, {error, Reason}),
-	    exit(Reason);
-	ignore ->
-	    unregister_name(Name0),
-	    proc_lib:init_ack(Starter, ignore),
-	    exit(normal);
-	{'EXIT', Reason} ->
-	    unregister_name(Name0),
-	    proc_lib:init_ack(Starter, {error, Reason}),
-	    exit(Reason);
-	Else ->
-	    Error = {bad_return_value, Else},
-	    proc_lib:init_ack(Starter, {error, Error}),
-	    exit(Error)
-    end.
-
-%%% ------------------------------------------------------------------
-%%%  The MAIN loop.
-%%% ------------------------------------------------------------------
-loop(Parent, Name, State, Mod, hibernate, Debug) ->
-    proc_lib:hibernate(?MODULE,wake_hib,[Parent, Name, State, Mod, Debug]);
-loop(Parent, Name, State, Mod, Time, Debug) ->
-    Msg = receive
-	      Input -> Input
-	  after
-              Time -> timeout
-	  end,
-    decode_msg(Msg, Parent, Name, State, Mod, Time, Debug, false).
-
-wake_hib(Parent, Name, State, Mod, Debug) ->
-    Msg = receive
-	      Input -> Input
-	  end,
-    decode_msg(Msg, Parent, Name, State, Mod, hibernate, Debug, true).
-
-decode_msg(Msg, Parent, Name, State, Mod, Time, Debug, Hib) ->
-    case Msg of
-	{system, From, get_state} ->
-	    sys:handle_system_msg(get_state, From, Parent, ?MODULE, Debug,
-				  {State, [Name, State, Mod, Time]}, Hib);
-	{system, From, {replace_state, StateFun}} ->
-	    NState = try StateFun(State) catch _:_ -> State end,
-	    sys:handle_system_msg(replace_state, From, Parent, ?MODULE, Debug,
-				  {NState, [Name, NState, Mod, Time]}, Hib);
-	{system, From, Req} ->
-	    sys:handle_system_msg(Req, From, Parent, ?MODULE, Debug,
-				  [Name, State, Mod, Time], Hib);
-	{'EXIT', Parent, Reason} ->
-	    terminate(Reason, Name, Msg, Mod, State, Debug);
-	_Msg when Debug =:= [] ->
-	    handle_msg(Msg, Parent, Name, State, Mod);
-	_Msg ->
-	    Debug1 = sys:handle_debug(Debug, fun print_event/3,
-				      Name, {in, Msg}),
-	    handle_msg(Msg, Parent, Name, State, Mod, Debug1)
-    end.
-
-%%% ------------------------------------------------------------------
-%%%  Send functions
-%%% ------------------------------------------------------------------
--spec cast(Dest :: ref(), Msg :: any()) -> ok.
-cast({global, Name}, Msg) ->
-    catch global:send(Name, pub_msg(Msg)),
-    ok;
-cast({via, Mod, Name}, Msg) ->
-    catch Mod:send(Name, pub_msg(Msg)),
-    ok;
-cast({Name, Node}=Dest, Msg) when is_atom(Name), is_atom(Node) ->
-    do_send(Dest, Msg);
-cast(Dest, Msg) when is_atom(Dest) ->
-    do_send(Dest, Msg);
-cast(Dest, Msg) when is_pid(Dest) ->
-    do_send(Dest, Msg).
-
--spec do_send(Dest :: pid() | atom() | {Name :: atom(), node()},
-              Msg  :: any())
-             -> ok.
-do_send(Dest, Msg) ->
-    case catch erlang:send(Dest, Msg, [noconnect]) of
-	noconnect ->
-	    spawn(erlang, send, [Dest,Msg]);
-	Other ->
-            Other
-    end.
-
-%%-----------------------------------------------------------------
-%% Format debug messages.  Print them as the call-back module sees
-%% them, not as the real erlang messages.  Use trace for that.
-%%-----------------------------------------------------------------
-print_event(Dev, {in, Msg}, Name) ->
-    case Msg of
-	{'$gen_call', {From, _Tag}, Call} ->
-	    io:format(Dev, "*DBG* ~p got call ~p from ~w~n",
-		      [Name, Call, From]);
-	{'$gen_cast', Cast} ->
-	    io:format(Dev, "*DBG* ~p got cast ~p~n",
-		      [Name, Cast]);
-	_ ->
-	    io:format(Dev, "*DBG* ~p got ~p~n", [Name, Msg])
+handle_cast(?PUB(From, Msg), #state{module=Mod, linked_procs=LP}=S) ->
+    case Mod:handle_publish(Msg, From, S#state.client_state) of
+        {ok, UID, NewClientState} ->
+            Clients = [C || {C, _} <- LP],
+            spawn_link(?MODULE, do_publish,
+                       [self(), UID, Clients, Msg]),
+            _ = erlang:send(From, {pubsub, self(), {published, UID}}),
+            {noreply, S#state{client_state=NewClientState}};
+        {reject, NewClientState} ->
+            {noreply, S#state{client_state=NewClientState}}
     end;
-print_event(Dev, {out, Msg, To, State}, Name) ->
-    io:format(Dev, "*DBG* ~p sent ~p to ~w, new state ~w~n",
-	      [Name, Msg, To, State]);
-print_event(Dev, {noreply, State}, Name) ->
-    io:format(Dev, "*DBG* ~p new state ~w~n", [Name, State]);
-print_event(Dev, Event, Name) ->
-    io:format(Dev, "*DBG* ~p dbg  ~p~n", [Name, Event]).
-
-%%% ---------------------------------------------------
-%%% Message handling functions
-%%% ---------------------------------------------------
-
-dispatch({'$gen_cast', Msg}, Mod, State) ->
-    Mod:handle_cast(Msg, State);
-dispatch(Info, Mod, State) ->
-    Mod:handle_info(Info, State).
-
-handle_msg({'$gen_call', From, Msg}, Parent, Name, State, Mod) ->
-    case catch Mod:handle_call(Msg, From, State) of
-	{reply, Reply, NState} ->
-	    reply(From, Reply),
-	    loop(Parent, Name, NState, Mod, infinity, []);
-	{reply, Reply, NState, Time1} ->
-	    reply(From, Reply),
-	    loop(Parent, Name, NState, Mod, Time1, []);
-	{noreply, NState} ->
-	    loop(Parent, Name, NState, Mod, infinity, []);
-	{noreply, NState, Time1} ->
-	    loop(Parent, Name, NState, Mod, Time1, []);
-	{stop, Reason, Reply, NState} ->
-	    {'EXIT', R} =
-		(catch terminate(Reason, Name, Msg, Mod, NState, [])),
-	    reply(From, Reply),
-	    exit(R);
-	Other -> handle_common_reply(Other, Parent, Name, Msg, Mod, State)
+handle_cast(?SUB(Client), #state{linked_procs=LP}=S) ->
+    case proplists:get_value(Client, LP) of
+        undefined ->
+            MonRef = erlang:monitor(process, Client),
+            _ = erlang:send(Client, {pubsub, self(), subscribed}),
+            {noreply, S#state{linked_procs=[{Client, MonRef} | LP]}};
+        MonRef when is_reference(MonRef) ->
+            _ = erlang:send(Client, {pubsub, self(), already_subscribed}),
+            {noreply, S}
     end;
-handle_msg(Msg, Parent, Name, State, Mod) ->
-    Reply = (catch dispatch(Msg, Mod, State)),
-    handle_common_reply(Reply, Parent, Name, Msg, Mod, State).
-
-handle_msg({'$gen_call', From, Msg}, Parent, Name, State, Mod, Debug) ->
-    case catch Mod:handle_call(Msg, From, State) of
-	{reply, Reply, NState} ->
-	    Debug1 = reply(Name, From, Reply, NState, Debug),
-	    loop(Parent, Name, NState, Mod, infinity, Debug1);
-	{reply, Reply, NState, Time1} ->
-	    Debug1 = reply(Name, From, Reply, NState, Debug),
-	    loop(Parent, Name, NState, Mod, Time1, Debug1);
-	{noreply, NState} ->
-	    Debug1 = sys:handle_debug(Debug, fun print_event/3, Name,
-				      {noreply, NState}),
-	    loop(Parent, Name, NState, Mod, infinity, Debug1);
-	{noreply, NState, Time1} ->
-	    Debug1 = sys:handle_debug(Debug, fun print_event/3, Name,
-				      {noreply, NState}),
-	    loop(Parent, Name, NState, Mod, Time1, Debug1);
-	{stop, Reason, Reply, NState} ->
-	    {'EXIT', R} =
-		(catch terminate(Reason, Name, Msg, Mod, NState, Debug)),
-	    _ = reply(Name, From, Reply, NState, Debug),
-	    exit(R);
-	Other ->
-	    handle_common_reply(Other, Parent, Name, Msg, Mod, State, Debug)
-    end;
-handle_msg(Msg, Parent, Name, State, Mod, Debug) ->
-    Reply = (catch dispatch(Msg, Mod, State)),
-    handle_common_reply(Reply, Parent, Name, Msg, Mod, State, Debug).
-
-handle_common_reply(Reply, Parent, Name, Msg, Mod, State) ->
-    case Reply of
-	{noreply, NState} ->
-	    loop(Parent, Name, NState, Mod, infinity, []);
-	{noreply, NState, Time1} ->
-	    loop(Parent, Name, NState, Mod, Time1, []);
-	{stop, Reason, NState} ->
-	    terminate(Reason, Name, Msg, Mod, NState, []);
-	{'EXIT', What} ->
-	    terminate(What, Name, Msg, Mod, State, []);
-	_ ->
-	    terminate({bad_return_value, Reply}, Name, Msg, Mod, State, [])
+handle_cast(?UNSUB(Client), #state{linked_procs=LP}=S) ->
+    case proplists:get_value(Client, LP) of
+        undefined ->
+            _ = erlang:send(Client, {pubsub, self(), not_subscribed}),
+            {noreply, S};
+        MonRef when is_reference(MonRef) ->
+            _DidFlush = erlang:demonitor(MonRef, [flush]),
+            LPs = proplists:delete(Client, S#state.linked_procs),
+            _ = erlang:send(Client, {pubsub, self(), unsubscribed}),
+            {noreply, S#state{linked_procs=LPs}}
     end.
 
-handle_common_reply(Reply, Parent, Name, Msg, Mod, State, Debug) ->
-    case Reply of
-	{noreply, NState} ->
-	    Debug1 = sys:handle_debug(Debug, fun print_event/3, Name,
-				      {noreply, NState}),
-	    loop(Parent, Name, NState, Mod, infinity, Debug1);
-	{noreply, NState, Time1} ->
-	    Debug1 = sys:handle_debug(Debug, fun print_event/3, Name,
-				      {noreply, NState}),
-	    loop(Parent, Name, NState, Mod, Time1, Debug1);
-	{stop, Reason, NState} ->
-	    terminate(Reason, Name, Msg, Mod, NState, Debug);
-	{'EXIT', What} ->
-	    terminate(What, Name, Msg, Mod, State, Debug);
-	_ ->
-	    terminate({bad_return_value, Reply}, Name, Msg, Mod, State, Debug)
+handle_info({'EXIT', _Pid, _Reason}, #state{}=S) ->
+    {noreply, S};
+handle_info({'DOWN', MonRef, process, Client, _Info},
+            #state{linked_procs=LP}=S) ->
+    case proplists:get_value(Client, LP) of
+        undefined ->
+            {noreply, S};
+        MonRef ->
+            true = erlang:demonitor(MonRef, [flush]),
+            LPs = proplists:delete(Client, S#state.linked_procs),
+            {noreply, S#state{linked_procs=LPs}}
     end.
 
-reply(Name, {To, Tag}, Reply, State, Debug) ->
-    reply({To, Tag}, Reply),
-    sys:handle_debug(Debug, fun print_event/3, Name,
-		     {out, Reply, To, State} ).
-
-
-reply({To, Tag}, Reply) ->
-    catch To ! {Tag, Reply}.
-
-%%% ---------------------------------------------------
-%%% Terminate the server.
-%%% ---------------------------------------------------
-
--spec terminate(_, _, _, _, _, _) -> no_return().
-terminate(Reason, Name, Msg, Mod, State, Debug) ->
-    case catch Mod:terminate(Reason, State) of
-	{'EXIT', R} ->
-	    error_info(R, Name, Msg, State, Debug),
-	    exit(R);
-	_ ->
-	    case Reason of
-		normal ->
-		    exit(normal);
-		shutdown ->
-		    exit(shutdown);
-		{shutdown,_}=Shutdown ->
-		    exit(Shutdown);
-		_ ->
-		    FmtState =
-			case erlang:function_exported(Mod, format_status, 2) of
-			    true ->
-				Args = [get(), State],
-				case catch Mod:format_status(terminate, Args) of
-				    {'EXIT', _} -> State;
-				    Else -> Else
-				end;
-			    _ ->
-				State
-			end,
-		    error_info(Reason, Name, Msg, FmtState, Debug),
-		    exit(Reason)
-	    end
-    end.
-
-error_info(_Reason, application_controller, _Msg, _State, _Debug) ->
-    %% OTP-5811 Don't send an error report if it's the system process
-    %% application_controller which is terminating - let init take care
-    %% of it instead
-    ok;
-error_info(Reason, Name, Msg, State, Debug) ->
-    Reason1 =
-	case Reason of
-	    {undef,[{M,F,A,L}|MFAs]} ->
-		case code:is_loaded(M) of
-		    false ->
-			{'module could not be loaded',[{M,F,A,L}|MFAs]};
-		    _ ->
-			case erlang:function_exported(M, F, length(A)) of
-			    true ->
-				Reason;
-			    false ->
-				{'function not exported',[{M,F,A,L}|MFAs]}
-			end
-		end;
-	    _ ->
-		Reason
-	end,
-    error_logger:format("** Generic server ~p terminating \n"
-                        "** Last message in was ~p~n"
-                        "** When Server state == ~p~n"
-                        "** Reason for termination == ~n** ~p~n",
-                        [Name, Msg, State, Reason1]),
-    sys:print_log(Debug),
+terminate(_Reason, _State) ->
     ok.
 
-%% -------------------------------------------------------------------
-%%  Miscellanious
-%% -------------------------------------------------------------------
-
-pub_msg(Msg)      -> {'$gen_pubsub_publish', Msg}.
-sub_msg(Client)   -> {'$gen_pubsub_subscribe', Client}.
-unsub_msg(Client) -> {'$gen_pubsub_unsubscribe', Client}.
-
-%% via gen_server.erl
-name({local,Name}) -> Name;
-name({global,Name}) -> Name;
-name({via,_, Name}) -> Name;
-name(Pid) when is_pid(Pid) -> Pid.
-
-%% via gen_server.erl
-unregister_name({local,Name}) ->
-    _ = (catch unregister(Name));
-unregister_name({global,Name}) ->
-    _ = global:unregister_name(Name);
-unregister_name({via, Mod, Name}) ->
-    _ = Mod:unregister_name(Name);
-unregister_name(Pid) when is_pid(Pid) ->
-    Pid.
+code_change(_OldVsn, State, _Extra) ->
+    {ok, State}.
 
 %% ===================================================================
-%%  Tests
+%%  Internal functions
 %% ===================================================================
 
--ifdef(TEST).
-
--endif.
+do_publish(_Parent, _UID, Clients, Msg) ->
+    ok = lists:foreach(fun(C) -> erlang:send(C, {pubsub, Msg}) end, Clients).
