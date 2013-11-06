@@ -17,9 +17,9 @@
 -export([
          start/3, start/4,
          start_link/3, start_link/4,
-         publish/2,
-         subscribe/2,
-         unsubscribe/2
+         publish/2, sync_publish/3,
+         subscribe/2, sync_subscribe/3,
+         unsubscribe/2, sync_unsubscribe/3
         ]).
 
 %% [PRIVATE] internal functions
@@ -58,20 +58,9 @@
 -define(SUB(Client),    {'$gen_pubsub_subscribe', Client}).
 -define(UNSUB(Client),  {'$gen_pubsub_unsubscribe', Client}).
 
-%%% I'm unsure about this. I sort of think that publishing--which is done in the
-%%% background--should have some notification _back_ to the sender. I am divided
-%%% as to whether this should be a callback function or what.
-%% -define(PUBSEND(UID), {'$gen_pubsub_publish_fin', UID}).
-
 %% ===================================================================
 %%  Types
 %% ===================================================================
-
-%% -type erlang:dst()        :: pid() | atom() | {Name :: atom(), node()} |
-%%                       {via, Mod :: module(), Name :: atom()} |
-%%                       {global, term()} | {local, atom()}.
-%% -type debug_flag() :: trace | log | {logfile, file:filename()} |
-%%                       statistics | debug.
 
 %% ===================================================================
 %%  Callback API
@@ -106,24 +95,9 @@ start(Module, Args, Options) ->
 start(ServerName, Module, Args, Options) ->
     gen_server:start(ServerName, ?MODULE, {Module, Args}, Options).
 
-%% -spec start_link(Mod :: module(),
-%%                  Args :: term(),
-%%                  Options :: [{timeout, timer:time()} |
-%%                              {debug, debug_flag()}])
-%%                 -> {ok, pid()} |
-%%                    {error, {already_started, pid()}} |
-%%                    {error, Reason :: term()}.
 start_link(Module, Args, Options) ->
     gen_server:start_link(?MODULE, {Module, Args}, Options).
 
-%% -spec start_link(Name :: {local, atom()} | {global, term()} | {via, atom(), term()},
-%%                  Mod :: module(),
-%%                  Args :: term(),
-%%                  Options :: [{timeout, timer:time()} |
-%%                              {debug, debug_flag()}])
-%%                 -> {ok, pid()} |
-%%                    {error, {already_started, pid()}} |
-%%                    {error, Reason :: term()}.
 start_link(ServerName, Module, Args, Options) ->
     gen_server:start_link(ServerName, ?MODULE, {Module, Args}, Options).
 
@@ -135,9 +109,16 @@ publish(PubSubRef, Msg) -> gen_server:cast(PubSubRef, ?PUB(self(), Msg)).
 
 %% Publishes a message to the pub-sub process subscribers. The calling process
 %% will block for up to Timeout milliseconds.
-%% -spec sync_publish(PubSub :: erlang:dst(),
-%%                    Msg :: any(),
-%%                    Timeout :: timer:time()) -> ok | {error, timeout}.
+-spec sync_publish(PubSubRef :: erlang:dst(),
+                   Msg       :: any(),
+                   Timeout   :: timer:time()) -> ok | {error, timeout}.
+sync_publish(PubSubRef, Msg, Timeout) ->
+    ok = gen_pubsub:publish(PubSubRef, Msg),
+    receive
+        {pubsub, PubSubRef, {published, _ID}} -> ok
+    after
+        Timeout -> {error, timeout}
+    end.
 
 %% Issues a subscribe request to the pub-sub process. The issuing process will
 %% receive a {pubsub, PubSub :: erlang:dst(), subscribed} message when subscribed.
@@ -146,9 +127,18 @@ subscribe(PubSubRef, Client) -> gen_server:cast(PubSubRef, ?SUB(Client)).
 
 %% Subscribes to the pub-sub process. The calling process will block for up to
 %% Timeout milliseconds.
-%% -spec sync_subscribe(PubSub :: erlang:dst(),
-%%                      Client :: erlang:dst(),
-%%                      Timeout :: timer:time()) -> ok | {error, timeout}.
+-spec sync_subscribe(PubSubRef :: erlang:dst(),
+                     Client    :: erlang:dst(),
+                     Timeout   :: timer:time()) -> ok | {error, timeout}
+                                                      | {error, already_subscribed}.
+sync_subscribe(PubSubRef, Client, Timeout) ->
+    ok = gen_pubsub:subscribe(PubSubRef, Client),
+    receive
+        {pubsub, PubSubRef, subscribed}         -> ok;
+        {pubsub, PubSubRef, already_subscribed} -> {error, already_subscribed}
+    after
+        Timeout -> {error, timeout}
+    end.
 
 %% Issues an unsubscribe request to the pub-sub process. The issuing process
 %% will receive a {pubsub, PubSub, unsubscribed} message when unsubscribed.
@@ -157,9 +147,18 @@ unsubscribe(PubSubRef, Client) -> gen_server:cast(PubSubRef, ?UNSUB(Client)).
 
 %% Unsubscribes from the pub-sub process. The calling process will block for up
 %% to Timeout milliseconds.
-%% -spec sync_unsubscribe(PubSub :: erlang:dst(),
-%%                        Client :: erlang:dst(),
-%%                        Timeout :: timer:time()) -> ok | {error, timeout}.
+-spec sync_unsubscribe(PubSubRef :: erlang:dst(),
+                       Client    :: erlang:dst(),
+                       Timeout   :: timer:time()) -> ok | {error, timeout}
+                                                        | {error, not_subscribed}.
+sync_unsubscribe(PubSubRef, Client, Timeout) ->
+    ok = gen_pubsub:unsubscribe(PubSubRef, Client),
+    receive
+        {pubsub, PubSubRef, unsubscribed}   -> ok;
+        {pubsub, PubSubRef, not_subscribed} -> {error, not_subscribed}
+    after
+        Timeout -> {error, timeout}
+    end.
 
 %% ===================================================================
 %%  gen_server callbacks

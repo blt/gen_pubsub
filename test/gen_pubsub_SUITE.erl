@@ -68,8 +68,8 @@ start_test(_Config) ->
 
     ok.
 
-subsciption_test(_Config) ->
-    {ok, PB} = gen_pubsub:start_link(?MODULE, [], []),
+subsciption_test(Config) ->
+    PB = ?config(pubsub, Config),
 
     ok = gen_pubsub:subscribe(PB, self()),
     ?RECVFAIL({pubsub, PB, subscribed}, subscription),
@@ -83,7 +83,11 @@ subsciption_test(_Config) ->
     ok = gen_pubsub:unsubscribe(PB, self()),
     ?RECVFAIL({pubsub, PB, not_subscribed}, repeat_unsubscription),
 
-    true = exit(PB, normal).
+    ok = gen_pubsub:sync_subscribe(PB, self(), 1000),
+    {error, already_subscribed} = gen_pubsub:sync_subscribe(PB, self(), 1000),
+
+    ok = gen_pubsub:sync_unsubscribe(PB, self(), 1000),
+    {error, not_subscribed} = gen_pubsub:sync_unsubscribe(PB, self(), 1000).
 
 publish_test(Config) ->
     PB = ?config(pubsub, Config),
@@ -94,6 +98,9 @@ publish_test(Config) ->
     ok = gen_pubsub:publish(PB, message),
     ?RECVFAIL({pubsub, message}, publish_receipt),
     ?RECVFAIL({pubsub, PB, {published, test_uid}}, publish_receipt),
+
+    ok = gen_pubsub:sync_publish(PB, message, 1000),
+    ?RECVFAIL({pubsub, message}, publish_receipt),
 
     ok = gen_pubsub:publish(PB, ignore_me_message),
     receive Msg -> test_server:fail({bad_receive, Msg})
