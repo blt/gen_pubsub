@@ -1,0 +1,18 @@
+@author Brian L. Troutwine <brian@troutwine.us>
+@copyright 2013 Brian L. Troutwine
+@version 0.0.1
+@title The `gen_pubsub' behaviour.
+
+@doc `gen_pubsub' is a proof-of-concept for a pub-sub communication pattern
+     behaviour. All 'channels' are implementations of the `gen_pubsub'
+     behaviour, the references to which are kept in some way by the programmer.
+     For instance, you might set up `gen_pubsub' implementations as named
+     processes.
+
+     This library exists as a proof-of-concept of the idea; it's a sketch I put
+     together over a vacation. As of this writing, the behaviour is itself
+     implemented on top of `gen_server', so it's not the world's most performant
+     bit of code. If a production-worthy use could be found for this a
+     production-worthy implementation wouldn't be a tremendous amount of work.
+
+     I digress. Please see the module for more documentation. Comments welcome!

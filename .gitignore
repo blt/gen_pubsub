@@ -4,3 +4,8 @@ deps/
 .eunit
 *.beam
 _rel/
+
+doc/*.html
+doc/*.css
+doc/*.png
+doc/edoc-info

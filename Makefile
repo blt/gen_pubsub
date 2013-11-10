@@ -13,14 +13,17 @@ app.plt:
 	@$(DIALYZER) --build_plt --output_plt app.plt --apps erts kernel stdlib crypto
 
 dialyze: app.plt compile
-	@$(DIALYZER) -q --plt app.plt ebin -Wunmatched_returns \
+	@$(DIALYZER) --plt app.plt ebin -Wunmatched_returns \
 		-Werror_handling -Wrace_conditions -Wno_undefined_callbacks
 
 test: compile
-	# @$(REBAR) eunit skip_deps=true verbose=0
 	ct_run -dir test/ -pa src/ -pa ebin/ -verbosity 0 -logdir .ct/logs -cover test/cover.spec -erl_args +K true +A 10
 
 validate: dialyze test
+
+docs: compile
+	erl -noshell -run edoc_run application \
+	"'$(APP_NAME)'" '"."' '[{def,{vsn,"$(VSN)"}}]'
 
 clean:
 	@$(RM) -rf deps/

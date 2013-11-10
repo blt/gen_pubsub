@@ -97,15 +97,13 @@ publish_test(Config) ->
 
     ok = gen_pubsub:publish(PB, message),
     ?RECVFAIL({pubsub, message}, publish_receipt),
-    ?RECVFAIL({pubsub, PB, {published, test_uid}}, publish_receipt),
+    ?RECVFAIL({pubsub, PB, published}, publish_receipt),
 
     ok = gen_pubsub:sync_publish(PB, message, 1000),
     ?RECVFAIL({pubsub, message}, publish_receipt),
 
     ok = gen_pubsub:publish(PB, ignore_me_message),
-    receive Msg -> test_server:fail({bad_receive, Msg})
-    after 1000  -> ok
-    end.
+    ?RECVFAIL({pubsub, PB, rejected}, publish_receipt).
 
 crash_test(Config) ->
     PB = ?config(pubsub, Config),
@@ -122,7 +120,7 @@ crash_test(Config) ->
     process_flag(trap_exit, TrapFlag),
 
     ok = gen_pubsub:publish(PB, message),
-    ?RECVFAIL({pubsub, PB, {published, test_uid}}, publish_receipt).
+    ?RECVFAIL({pubsub, PB, published}, publish_receipt).
 
 %% ===================================================================
 %%  gen_pubsub callbacks
@@ -140,4 +138,4 @@ handle_unsubscribe(_Reason, _From, State) ->
 handle_publish(ignore_me_message, _From, State) ->
     {reject, State};
 handle_publish(_Msg, _From, State) ->
-    {ok, test_uid, State}.
+    {ok, State}.
