@@ -22,3 +22,7 @@ Please see the `test/gen_pubsub_SUITE` for an example implementation and
 This is a sketch of an idea and is not a production quality implementation,
 possibly. I had the idea while on vacation, knocked it around a bit, started a
 new job, knocked it around some more and here we are.
+
+
+[![Bitdeli Badge](https://d2weczhvl823v0.cloudfront.net/blt/gen_pubsub/trend.png)](https://bitdeli.com/free "Bitdeli Badge")
+
